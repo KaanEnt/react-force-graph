@@ -1,0 +1,459 @@
+<head>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000003; }
+    #controls {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #aaa;
+      font-size: 13px;
+    }
+    #controls button {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #ddd;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      margin-right: 6px;
+      transition: background 0.2s;
+    }
+    #controls button:hover { background: rgba(255,255,255,0.18); }
+    #status {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      z-index: 10;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: rgba(255,255,255,0.35);
+      font-size: 12px;
+    }
+  </style>
+
+  <script type="importmap">{ "imports": {
+    "react": "https://esm.sh/react",
+    "react-dom": "https://esm.sh/react-dom/client"
+  }}</script>
+</head>
+
+<body>
+  <div id="controls">
+    <button id="btn-spawn">Spawn Next Wave</button>
+    <button id="btn-auto">Auto Spawn</button>
+    <button id="btn-explode">Explode All</button>
+    <button id="btn-reset">Reset</button>
+    <span id="info" style="margin-left:12px;"></span>
+  </div>
+  <div id="status"></div>
+  <div id="graph"></div>
+
+  <script src="//cdn.jsdelivr.net/npm/@babel/standalone"></script>
+  <script type="text/jsx" data-type="module">
+    import ForceGraph3D from 'https://esm.sh/react-force-graph-3d?external=react';
+    import React, { useRef, useState, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
+    import { createRoot } from 'react-dom';
+    import { UnrealBloomPass } from 'https://esm.sh/three/examples/jsm/postprocessing/UnrealBloomPass.js';
+    import SpriteText from 'https://esm.sh/three-spritetext';
+    import * as THREE from 'https://esm.sh/three';
+
+    const BASE_RADIUS = 80;
+    const SHELL_HUES = [180, 300, 45, 120, 220, 30, 270];
+    const ANIM_DURATION = 1200;
+
+    // ── geometry ──
+
+    function fibonacciSphere(n, radius) {
+      if (n === 1) return [{ x: 0, y: radius, z: 0 }];
+      const points = [];
+      const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+      for (let i = 0; i < n; i++) {
+        const y = 1 - (i / (n - 1)) * 2;
+        const r = Math.sqrt(1 - y * y);
+        const theta = goldenAngle * i;
+        points.push({
+          x: Math.cos(theta) * r * radius,
+          y: y * radius,
+          z: Math.sin(theta) * r * radius,
+        });
+      }
+      return points;
+    }
+
+    function elasticOut(t) {
+      return Math.sin(-13 * (t + 1) * Math.PI / 2) * Math.pow(2, -10 * t) + 1;
+    }
+
+    function angularDistance(a, b) {
+      const magA = Math.sqrt(a.targetX ** 2 + a.targetY ** 2 + a.targetZ ** 2);
+      const magB = Math.sqrt(b.targetX ** 2 + b.targetY ** 2 + b.targetZ ** 2);
+      if (magA === 0 || magB === 0) return Math.PI;
+      const dot = (a.targetX * b.targetX + a.targetY * b.targetY + a.targetZ * b.targetZ) / (magA * magB);
+      return Math.acos(Math.min(1, Math.max(-1, dot)));
+    }
+
+    function hslToHex(h, s, l) {
+      s /= 100; l /= 100;
+      const f = n => {
+        const k = (n + h / 30) % 12;
+        const a = s * Math.min(l, 1 - l);
+        return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+      };
+      return '#' + [f(0), f(8), f(4)].map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+
+    // ── shell engine ──
+
+    function createShellEngine() {
+      const nodes = [];
+      const links = [];
+      const waves = [];
+      let nextId = 0;
+
+      function spawnShell(wave, names) {
+        const count = names.length;
+        const radius = BASE_RADIUS * Math.max(1, wave);
+        const targets = wave === 0
+          ? [{ x: 0, y: 0, z: 0 }]
+          : fibonacciSphere(count, radius);
+
+        const baseHue = wave === 0 ? 0 : SHELL_HUES[(wave - 1) % SHELL_HUES.length];
+        const newNodes = [];
+
+        for (let i = 0; i < count; i++) {
+          const color = wave === 0
+            ? '#ffffff'
+            : hslToHex(baseHue + (i * 15 - count * 7), 75, 60);
+
+          const node = {
+            id: nextId++,
+            name: names[i],
+            wave,
+            color,
+            val: wave === 0 ? 8 : Math.max(2, 6 - wave),
+            x: 0, y: 0, z: 0,
+            fx: 0, fy: 0, fz: 0,
+            targetX: targets[i].x,
+            targetY: targets[i].y,
+            targetZ: targets[i].z,
+          };
+          nodes.push(node);
+          newNodes.push(node);
+        }
+
+        waves[wave] = newNodes;
+
+        if (count >= 3) {
+          for (let i = 0; i < count; i++) {
+            links.push({
+              source: newNodes[i].id,
+              target: newNodes[(i + 1) % count].id,
+              type: 'cycle',
+            });
+          }
+        } else if (count === 2) {
+          links.push({ source: newNodes[0].id, target: newNodes[1].id, type: 'cycle' });
+        }
+
+        if (wave === 1) {
+          const coreNode = waves[0][0];
+          for (const n of newNodes) {
+            links.push({ source: coreNode.id, target: n.id, type: 'radial' });
+          }
+        } else if (wave > 1) {
+          const prevShell = waves[wave - 1];
+          for (const n of newNodes) {
+            const sorted = [...prevShell].sort(
+              (a, b) => angularDistance(n, a) - angularDistance(n, b)
+            );
+            const connectCount = Math.min(2, sorted.length);
+            for (let j = 0; j < connectCount; j++) {
+              links.push({ source: sorted[j].id, target: n.id, type: 'radial' });
+            }
+          }
+        }
+
+        return newNodes;
+      }
+
+      function reset() {
+        nodes.length = 0;
+        links.length = 0;
+        waves.length = 0;
+        nextId = 0;
+      }
+
+      return { nodes, links, waves, spawnShell, reset };
+    }
+
+    // ── explosion animation ──
+
+    function animateExplosion(newNodes, duration = ANIM_DURATION) {
+      return new Promise(resolve => {
+        const start = performance.now();
+        function tick(now) {
+          const t = Math.min(1, (now - start) / duration);
+          const e = elasticOut(t);
+          for (const node of newNodes) {
+            node.x = node.targetX * e;
+            node.y = node.targetY * e;
+            node.z = node.targetZ * e;
+            node.fx = node.x;
+            node.fy = node.y;
+            node.fz = node.z;
+          }
+          if (t < 1) {
+            requestAnimationFrame(tick);
+          } else {
+            for (const node of newNodes) {
+              node.x = node.targetX;
+              node.y = node.targetY;
+              node.z = node.targetZ;
+              node.fx = node.targetX;
+              node.fy = node.targetY;
+              node.fz = node.targetZ;
+            }
+            resolve();
+          }
+        }
+        requestAnimationFrame(tick);
+      });
+    }
+
+    // ── topic data ──
+
+    const TOPIC_TREE = [
+      { name: "Core", children: [
+        { name: "AI / ML", children: [
+          { name: "LLMs" }, { name: "Computer Vision" }, { name: "Reinforcement Learning" },
+          { name: "Diffusion Models" }, { name: "Neural Arch Search" },
+        ]},
+        { name: "Web Dev", children: [
+          { name: "React" }, { name: "Next.js" }, { name: "WebGL" },
+          { name: "Edge Functions" }, { name: "WebAssembly" },
+        ]},
+        { name: "Infrastructure", children: [
+          { name: "Kubernetes" }, { name: "Terraform" }, { name: "Serverless" },
+          { name: "Edge Computing" },
+        ]},
+        { name: "Data", children: [
+          { name: "Streaming" }, { name: "Graph DBs" }, { name: "Vector Search" },
+          { name: "Data Lakes" },
+        ]},
+        { name: "Design", children: [
+          { name: "3D on Web" }, { name: "Motion Design" }, { name: "Generative Art" },
+        ]},
+      ]},
+    ];
+
+    function buildWaves(topicTree) {
+      const waves = [];
+      function walk(items, depth) {
+        if (!waves[depth]) waves[depth] = [];
+        for (const item of items) {
+          waves[depth].push(item.name);
+          if (item.children) walk(item.children, depth + 1);
+        }
+      }
+      walk(topicTree, 0);
+      return waves;
+    }
+
+    // ── main component ──
+
+    const MindmapSpawn = forwardRef(function MindmapSpawn(_, ref) {
+      const fgRef = useRef();
+      const engineRef = useRef(createShellEngine());
+      const topicWavesRef = useRef(buildWaves(TOPIC_TREE));
+      const [graphData, setGraphData] = useState({ nodes: [], links: [] });
+      const currentWaveRef = useRef(-1);
+      const orbitAngleRef = useRef(0);
+      const targetDistRef = useRef(250);
+      const cameraDistRef = useRef(250);
+
+      useEffect(() => {
+        const bloomPass = new UnrealBloomPass();
+        bloomPass.strength = 3.5;
+        bloomPass.radius = 1;
+        bloomPass.threshold = 0;
+        fgRef.current.postProcessingComposer().addPass(bloomPass);
+      }, []);
+
+      useEffect(() => {
+        fgRef.current.cameraPosition({ z: cameraDistRef.current });
+
+        const interval = setInterval(() => {
+          if (!fgRef.current) return;
+          cameraDistRef.current += (targetDistRef.current - cameraDistRef.current) * 0.02;
+          const d = cameraDistRef.current;
+          const a = orbitAngleRef.current;
+          fgRef.current.cameraPosition({
+            x: d * Math.sin(a),
+            y: d * 0.3,
+            z: d * Math.cos(a),
+          });
+          orbitAngleRef.current += Math.PI / 300;
+        }, 10);
+
+        return () => clearInterval(interval);
+      }, []);
+
+      const spawnWave = useCallback(() => {
+        const engine = engineRef.current;
+        const topicWaves = topicWavesRef.current;
+        const nextWave = currentWaveRef.current + 1;
+        const names = topicWaves[nextWave];
+        if (!names) return false;
+
+        const newNodes = engine.spawnShell(nextWave, names);
+        currentWaveRef.current = nextWave;
+        setGraphData({ nodes: [...engine.nodes], links: [...engine.links] });
+
+        targetDistRef.current = Math.max(250, BASE_RADIUS * (nextWave + 1) * 3);
+        animateExplosion(newNodes);
+
+        return topicWaves[nextWave + 1] !== undefined;
+      }, []);
+
+      const reset = useCallback(() => {
+        engineRef.current.reset();
+        currentWaveRef.current = -1;
+        setGraphData({ nodes: [], links: [] });
+        targetDistRef.current = 250;
+        cameraDistRef.current = 250;
+      }, []);
+
+      useImperativeHandle(ref, () => ({ spawnWave, reset }));
+
+      return <ForceGraph3D
+        ref={fgRef}
+        graphData={graphData}
+        backgroundColor="#000003"
+        nodeLabel="name"
+        nodeVal="val"
+        nodeColor="color"
+        nodeOpacity={0.9}
+        nodeResolution={16}
+        warmupTicks={0}
+        cooldownTicks={0}
+        nodeThreeObjectExtend={true}
+        nodeThreeObject={node => {
+          const group = new THREE.Group();
+
+          const glowGeo = new THREE.SphereGeometry(node.val * 1.8, 16, 16);
+          const glowMat = new THREE.MeshBasicMaterial({
+            color: node.color,
+            transparent: true,
+            opacity: 0.15,
+          });
+          group.add(new THREE.Mesh(glowGeo, glowMat));
+
+          const ringGeo = new THREE.TorusGeometry(node.val * 1.4, 0.15, 8, 32);
+          const ringMat = new THREE.MeshBasicMaterial({
+            color: node.color,
+            transparent: true,
+            opacity: 0.3,
+          });
+          const ring = new THREE.Mesh(ringGeo, ringMat);
+          ring.rotation.x = Math.PI / 2;
+          group.add(ring);
+
+          const sprite = new SpriteText(node.name);
+          sprite.color = node.color;
+          sprite.textHeight = node.wave === 0 ? 6 : 4;
+          sprite.backgroundColor = 'rgba(0,0,0,0.5)';
+          sprite.borderRadius = 3;
+          sprite.padding = [2, 4];
+          sprite.position.y = node.val * 2.2;
+          group.add(sprite);
+
+          return group;
+        }}
+        linkColor={link => {
+          const srcColor = typeof link.source === 'object' ? link.source.color : '#444';
+          return srcColor + '88';
+        }}
+        linkWidth={0.5}
+        linkOpacity={0.4}
+        linkDirectionalParticles={2}
+        linkDirectionalParticleWidth={0.8}
+        linkDirectionalParticleSpeed={0.006}
+        linkDirectionalParticleColor={link =>
+          typeof link.source === 'object' ? link.source.color : '#fff'
+        }
+        linkCurvature={link => link.type === 'cycle' ? 0.25 : 0}
+      />;
+    });
+
+    // ── mount & wire up controls ──
+
+    const rootEl = document.getElementById('graph');
+    const root = createRoot(rootEl);
+    const appRef = React.createRef();
+
+    function App() {
+      return <MindmapSpawn ref={appRef} />;
+    }
+    root.render(<App />);
+
+    let autoInterval = null;
+    let explodeInterval = null;
+    const infoEl = document.getElementById('info');
+
+    document.getElementById('btn-spawn').addEventListener('click', () => {
+      if (appRef.current) {
+        const hasMore = appRef.current.spawnWave();
+        if (!hasMore) infoEl.textContent = 'All waves spawned';
+      }
+    });
+
+    document.getElementById('btn-auto').addEventListener('click', () => {
+      if (autoInterval) {
+        clearInterval(autoInterval);
+        autoInterval = null;
+        infoEl.textContent = 'Auto paused';
+        return;
+      }
+      infoEl.textContent = 'Auto spawning...';
+      const tick = () => {
+        if (appRef.current) {
+          const hasMore = appRef.current.spawnWave();
+          if (!hasMore) {
+            clearInterval(autoInterval);
+            autoInterval = null;
+            infoEl.textContent = 'All waves spawned';
+          }
+        }
+      };
+      tick();
+      autoInterval = setInterval(tick, 2000);
+    });
+
+    document.getElementById('btn-explode').addEventListener('click', () => {
+      if (autoInterval) { clearInterval(autoInterval); autoInterval = null; }
+      if (explodeInterval) { clearInterval(explodeInterval); explodeInterval = null; }
+      infoEl.textContent = 'Exploding all...';
+      const tick = () => {
+        if (appRef.current) {
+          const hasMore = appRef.current.spawnWave();
+          if (!hasMore) {
+            clearInterval(explodeInterval);
+            explodeInterval = null;
+            infoEl.textContent = 'All waves exploded';
+          }
+        }
+      };
+      tick();
+      explodeInterval = setInterval(tick, 300);
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      if (autoInterval) { clearInterval(autoInterval); autoInterval = null; }
+      if (explodeInterval) { clearInterval(explodeInterval); explodeInterval = null; }
+      if (appRef.current) appRef.current.reset();
+      infoEl.textContent = '';
+    });
+  </script>
+</body>

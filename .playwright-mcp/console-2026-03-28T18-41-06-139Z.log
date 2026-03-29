@@ -1,0 +1,5 @@
+[    1007ms] [WARNING] You are using the in-browser Babel transformer. Be sure to precompile your scripts for production - https://babeljs.io/docs/setup/ @ http://cdn.jsdelivr.net/npm/@babel/standalone:2
+[    2113ms] [WARNING] THREE.WARNING: Multiple instances of Three.js being imported. @ https://esm.sh/three@0.182.0/es2022/build/three.core.mjs:1
+[    2122ms] [WARNING] THREE.THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ https://esm.sh/three@0.183.2/es2022/build/three.core.mjs:1
+[    2198ms] [WARNING] THREE.THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ https://esm.sh/three@0.183.2/es2022/build/three.core.mjs:1
+[    3030ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:3000/favicon.ico:0
