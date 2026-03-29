@@ -59,7 +59,6 @@
     import SpriteText from 'https://esm.sh/three-spritetext';
     import * as THREE from 'https://esm.sh/three';
 
-    const BASE_RADIUS = 80;
     const ANIM_DURATION = 1200;
 
     function waveHue(wave) {
@@ -153,7 +152,7 @@
 
       function spawnShell(wave, names) {
         const count = names.length;
-        const radius = BASE_RADIUS * Math.max(1, wave);
+        const radius = wave === 0 ? 0 : 60 + wave * 35;
         const targets = wave === 0
           ? [{ x: 0, y: 0, z: 0 }]
           : fibonacciSphere(count, radius);
@@ -268,46 +267,13 @@
       const engineRef = useRef(createShellEngine());
       const [graphData, setGraphData] = useState({ nodes: [], links: [] });
       const currentWaveRef = useRef(-1);
-      const orbitAngleRef = useRef(0);
-      const targetDistRef = useRef(250);
-      const cameraDistRef = useRef(250);
-      const userDraggingRef = useRef(false);
-
       useEffect(() => {
         const bloomPass = new UnrealBloomPass();
         bloomPass.strength = 3.5;
         bloomPass.radius = 1;
         bloomPass.threshold = 0;
         fgRef.current.postProcessingComposer().addPass(bloomPass);
-      }, []);
-
-      useEffect(() => {
-        fgRef.current.cameraPosition({ z: cameraDistRef.current });
-
-        const el = fgRef.current.renderer().domElement;
-        const onDown = () => { userDraggingRef.current = true; };
-        const onUp = () => { userDraggingRef.current = false; };
-        el.addEventListener('pointerdown', onDown);
-        window.addEventListener('pointerup', onUp);
-
-        const interval = setInterval(() => {
-          if (!fgRef.current || userDraggingRef.current) return;
-          cameraDistRef.current += (targetDistRef.current - cameraDistRef.current) * 0.05;
-          const d = cameraDistRef.current;
-          const a = orbitAngleRef.current;
-          fgRef.current.cameraPosition({
-            x: d * Math.sin(a),
-            y: d * 0.3,
-            z: d * Math.cos(a),
-          });
-          orbitAngleRef.current += Math.PI / 120;
-        }, 30);
-
-        return () => {
-          el.removeEventListener('pointerdown', onDown);
-          window.removeEventListener('pointerup', onUp);
-          clearInterval(interval);
-        };
+        fgRef.current.cameraPosition({ z: 250 });
       }, []);
 
       const spawnWave = useCallback(() => {
@@ -319,7 +285,20 @@
         currentWaveRef.current = nextWave;
         setGraphData({ nodes: [...engine.nodes], links: [...engine.links] });
 
-        targetDistRef.current = Math.max(250, 200 + BASE_RADIUS * nextWave * 2);
+        if (fgRef.current) {
+          const pos = fgRef.current.cameraPosition();
+          const currentDist = Math.sqrt(pos.x ** 2 + pos.y ** 2 + pos.z ** 2);
+          const radius = 60 + nextWave * 35;
+          const needDist = Math.max(200, 150 + radius * 2.2);
+          if (needDist > currentDist) {
+            const scale = needDist / (currentDist || 1);
+            fgRef.current.cameraPosition(
+              { x: pos.x * scale, y: pos.y * scale, z: pos.z * scale },
+              { x: 0, y: 0, z: 0 },
+              800
+            );
+          }
+        }
         animateExplosion(newNodes);
 
         return true;
@@ -330,8 +309,6 @@
         currentWaveRef.current = -1;
         termIdx = 0;
         setGraphData({ nodes: [], links: [] });
-        targetDistRef.current = 250;
-        cameraDistRef.current = 250;
       }, []);
 
       useImperativeHandle(ref, () => ({ spawnWave, reset }));
